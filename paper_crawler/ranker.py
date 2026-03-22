@@ -13,7 +13,8 @@ from openai import AsyncOpenAI
 
 from nemo_curator import AsyncOpenAIClient
 
-from .parser import ParsedPaper, Reference
+from .parser import ParsedPaper
+from .references import Reference
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +37,8 @@ most to least important.
 
 Return ONLY valid JSON. Example:
 [
-  {{"ref_number": 3, "reason": "Core method this paper extends."}},
-  {{"ref_number": 7, "reason": "Provides the dataset used for evaluation."}}
+  {{"cite_key": "smith2023", "reason": "Core method this paper extends."}},
+  {{"cite_key": "jones2024", "reason": "Provides the dataset used for evaluation."}}
 ]
 """
 
@@ -53,15 +54,24 @@ class RankedReference:
 
 def _format_references_block(references: list[Reference]) -> str:
     lines = []
-    for ref in references:
-        num = ref.ref_number if ref.ref_number is not None else "?"
-        lines.append(f"[{num}] {ref.raw_text[:300]}")
+    for i, ref in enumerate(references):
+        parts = [f"[{ref.cite_key}]"]
+        if ref.title:
+            parts.append(ref.title)
+        if ref.authors:
+            parts.append(f"by {ref.authors[:100]}")
+        if ref.year:
+            parts.append(f"({ref.year})")
+        if ref.arxiv_id:
+            parts.append(f"[arxiv:{ref.arxiv_id}]")
+        if not ref.title and ref.raw_text:
+            parts.append(ref.raw_text[:200])
+        lines.append(" ".join(parts))
     return "\n".join(lines)
 
 
 def _parse_ranking_response(response_text: str, references: list[Reference]) -> list[RankedReference]:
     """Parse the LLM's JSON ranking response."""
-    # Try to extract JSON from the response
     text = response_text.strip()
 
     # Handle markdown code blocks
@@ -77,16 +87,16 @@ def _parse_ranking_response(response_text: str, references: list[Reference]) -> 
         logger.warning("Failed to parse LLM ranking response as JSON")
         return []
 
-    # Build lookup by ref_number
-    ref_by_num = {r.ref_number: r for r in references if r.ref_number is not None}
+    # Build lookup by cite_key
+    ref_by_key = {r.cite_key: r for r in references}
 
     ranked = []
     for rank_idx, entry in enumerate(rankings):
-        ref_num = entry.get("ref_number")
+        cite_key = entry.get("cite_key", "")
         reason = entry.get("reason", "")
-        if ref_num in ref_by_num:
+        if cite_key in ref_by_key:
             ranked.append(RankedReference(
-                reference=ref_by_num[ref_num],
+                reference=ref_by_key[cite_key],
                 rank=rank_idx + 1,
                 reason=reason,
             ))
