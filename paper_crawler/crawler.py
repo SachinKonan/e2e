@@ -1,14 +1,19 @@
 """Recursive BFS paper crawler with LLM-guided citation pruning.
 
 Algorithm:
-  1. Start with seed papers (high-impact leaves)
+  1. Start with seed papers (must exist in the NeMo Curator arxiv index)
   2. For each paper in the frontier:
-     a. Check local cache, download PDF if missing
-     b. Parse PDF, extract references
-     c. Send to LLM for ranking
-     d. Take top-K ranked references with arxiv IDs
-     e. Add to next frontier (if not already visited)
+     a. Look up text in local cache (LaTeX-extracted via NeMo Curator)
+     b. Parse text, extract references with arxiv IDs
+     c. Filter: only keep refs that ALSO exist in the cache (have LaTeX source)
+     d. Send to LLM for ranking
+     e. Take top-K ranked references
+     f. Add to next frontier (if not already visited)
   3. Repeat for N levels
+
+Key constraint: we only follow papers that are (1) on arxiv and (2) have
+LaTeX source available in our NeMo Curator index. This naturally filters
+the graph to high-quality, parseable papers.
 """
 
 import asyncio
@@ -18,8 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .cache import PaperCache
-from .parser import ParsedPaper, parse_pdf
-from .ranker import RankedReference, ReferenceRanker
+from .parser import ParsedPaper, parse_paper
+from .ranker import ReferenceRanker
 from .synth import SynthPipeline
 
 logger = logging.getLogger(__name__)
@@ -45,13 +50,14 @@ class CrawlResult:
     nodes: dict[str, CrawlNode] = field(default_factory=dict)
     seed_ids: list[str] = field(default_factory=list)
     max_depth: int = 0
+    skipped_no_source: set[str] = field(default_factory=set)
 
     def to_dict(self) -> dict:
-        """Serialize to JSON-compatible dict."""
         result = {
             "seed_ids": self.seed_ids,
             "max_depth": self.max_depth,
             "total_papers": len(self.nodes),
+            "skipped_no_source": len(self.skipped_no_source),
             "papers": {},
         }
         for aid, node in self.nodes.items():
@@ -69,7 +75,6 @@ class CrawlResult:
         return result
 
     def save(self, path: Path):
-        """Save crawl result to JSON."""
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
             json.dump(self.to_dict(), f, indent=2)
@@ -77,7 +82,7 @@ class CrawlResult:
 
 
 class PaperCrawler:
-    """BFS crawler that recursively discovers papers via LLM-ranked citations."""
+    """BFS crawler that discovers papers via LLM-ranked citations."""
 
     def __init__(
         self,
@@ -96,15 +101,26 @@ class PaperCrawler:
         self.max_papers = max_papers
 
     def _process_paper(self, arxiv_id: str) -> ParsedPaper | None:
-        """Download (if needed) and parse a single paper."""
-        try:
-            pdf_path = self.cache.fetch(arxiv_id)
-        except RuntimeError:
-            logger.error("Could not fetch %s", arxiv_id)
+        """Look up paper text in cache and parse it."""
+        text = self.cache.get_text(arxiv_id)
+        if text is None:
+            logger.debug("No LaTeX source for %s, skipping", arxiv_id)
             return None
 
         try:
-            return parse_pdf(pdf_path, arxiv_id)
+            parsed = parse_paper(arxiv_id, text)
+            # Filter references to only those with LaTeX source available
+            available = self.cache.available_ids()
+            before = len(parsed.references)
+            parsed.references = [
+                r for r in parsed.references
+                if r.arxiv_id and r.arxiv_id in available
+            ]
+            logger.info(
+                "%s: %d refs total, %d with LaTeX source available",
+                arxiv_id, before, len(parsed.references),
+            )
+            return parsed
         except Exception as e:
             logger.error("Failed to parse %s: %s", arxiv_id, e)
             return None
@@ -113,30 +129,28 @@ class PaperCrawler:
         """Run the recursive BFS crawl.
 
         Args:
-            seed_ids: List of arxiv IDs to start from.
+            seed_ids: List of arxiv IDs to start from (must be in cache).
 
         Returns:
-            CrawlResult containing the full citation graph discovered.
+            CrawlResult containing the discovered citation graph.
         """
         result = CrawlResult(seed_ids=list(seed_ids), max_depth=self.max_depth)
         visited: set[str] = set()
+        # (arxiv_id, depth, parent_id)
         frontier: list[tuple[str, int, str | None]] = [
             (aid, 0, None) for aid in seed_ids
-        ]  # (arxiv_id, depth, parent_id)
+        ]
 
         while frontier and len(result.nodes) < self.max_papers:
-            # Process current frontier level
             current_level = frontier
             frontier = []
-
-            # Group by depth for logging
             depth = current_level[0][1] if current_level else 0
+
             logger.info(
-                "=== Depth %d: processing %d papers (total visited: %d) ===",
-                depth, len(current_level), len(visited),
+                "=== Depth %d: %d papers to process (visited: %d, index size: %d) ===",
+                depth, len(current_level), len(visited), len(self.cache),
             )
 
-            # Parse all papers in current frontier
             papers_to_rank: list[tuple[CrawlNode, ParsedPaper]] = []
 
             for arxiv_id, d, parent_id in current_level:
@@ -146,6 +160,11 @@ class PaperCrawler:
                     break
 
                 visited.add(arxiv_id)
+
+                if not self.cache.has(arxiv_id):
+                    result.skipped_no_source.add(arxiv_id)
+                    continue
+
                 parsed = self._process_paper(arxiv_id)
                 if parsed is None:
                     continue
@@ -158,7 +177,7 @@ class PaperCrawler:
                 )
                 result.nodes[arxiv_id] = node
 
-                # Launch summarization + idea extraction as a side-effect
+                # Fire off summarization + idea extraction
                 if self.synth is not None:
                     asyncio.create_task(self.synth.process_paper(parsed))
 
@@ -168,7 +187,7 @@ class PaperCrawler:
             if not papers_to_rank:
                 continue
 
-            # Rank references for all papers in this level
+            # Rank references for all papers at this level
             parsed_list = [p for _, p in papers_to_rank]
             rankings = await self.ranker.rank_batch(parsed_list, top_k=self.top_k)
 
@@ -181,7 +200,6 @@ class PaperCrawler:
                         node.children.append(ref.arxiv_id)
                         frontier.append((ref.arxiv_id, node.depth + 1, node.arxiv_id))
 
-                        # Pre-create a stub node with ranking info
                         if ref.arxiv_id not in result.nodes:
                             result.nodes[ref.arxiv_id] = CrawlNode(
                                 arxiv_id=ref.arxiv_id,
@@ -192,12 +210,12 @@ class PaperCrawler:
                             )
 
             logger.info(
-                "Depth %d complete: %d new papers queued for next level",
-                depth, len(frontier),
+                "Depth %d done: %d new papers queued, %d skipped (no LaTeX source)",
+                depth, len(frontier), len(result.skipped_no_source),
             )
 
         logger.info(
-            "Crawl complete: %d papers discovered across %d levels",
-            len(result.nodes), self.max_depth,
+            "Crawl complete: %d papers, %d skipped (no source), %d levels",
+            len(result.nodes), len(result.skipped_no_source), self.max_depth,
         )
         return result

@@ -1,15 +1,13 @@
-"""PDF parsing and reference extraction.
+"""Paper text parsing and reference extraction from LaTeX-extracted text.
 
-Uses pymupdf (fitz) for text extraction and regex-based reference parsing.
-Falls back to GROBID-style heuristics for structured reference extraction.
+NeMo Curator's arxiv extractor gives us clean text with LaTeX markup stripped.
+We extract structure (title, abstract, references) from that clean text.
+References are matched to arxiv IDs where possible.
 """
 
 import logging
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
-
-import fitz  # pymupdf
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +43,7 @@ class Reference:
 
 @dataclass
 class ParsedPaper:
-    """Result of parsing a PDF."""
+    """Result of parsing a paper's extracted text."""
 
     arxiv_id: str
     full_text: str
@@ -55,29 +53,18 @@ class ParsedPaper:
     reference_section_text: str | None = None
 
 
-def extract_text(pdf_path: Path) -> str:
-    """Extract full text from a PDF using pymupdf."""
-    doc = fitz.open(str(pdf_path))
-    text_parts = []
-    for page in doc:
-        text_parts.append(page.get_text())
-    doc.close()
-    return "\n".join(text_parts)
-
-
 def extract_title(text: str) -> str | None:
-    """Heuristic: first non-empty line that looks like a title."""
+    """Heuristic: first substantial non-empty line."""
     lines = text.strip().split("\n")
     for line in lines[:10]:
         line = line.strip()
-        # Skip very short lines or lines that look like headers/page numbers
         if len(line) > 10 and not line.isdigit() and not line.startswith("arXiv:"):
             return line
     return None
 
 
 def extract_abstract(text: str) -> str | None:
-    """Extract abstract section."""
+    """Extract abstract section from clean text."""
     match = re.search(
         r"(?:Abstract|ABSTRACT)[.\s]*\n(.*?)(?:\n\s*(?:1[\s.]|Introduction|INTRODUCTION|I\.\s))",
         text,
@@ -102,16 +89,14 @@ def extract_arxiv_ids_from_text(text: str) -> list[str]:
 
 
 def extract_references(text: str) -> tuple[list[Reference], str | None]:
-    """Extract references section and parse individual entries.
-
-    Returns:
-        Tuple of (list of References, raw reference section text).
-    """
-    # Find reference section
+    """Extract references section and parse individual entries."""
     ref_match = REF_SECTION_PATTERN.search(text)
     if not ref_match:
-        logger.warning("No reference section found")
-        return [], None
+        # NeMo Curator strips bibliography by default, but some text may remain
+        # Fall back to scanning the whole text for arxiv IDs
+        arxiv_ids = extract_arxiv_ids_from_text(text)
+        refs = [Reference(raw_text=aid, arxiv_id=aid) for aid in arxiv_ids]
+        return refs, None
 
     ref_text = text[ref_match.start():]
     references = []
@@ -121,26 +106,21 @@ def extract_references(text: str) -> tuple[list[Reference], str | None]:
     if entries:
         for num_str, entry_text in entries:
             entry_text = entry_text.strip()
-            entry_text = re.sub(r"\s+", " ", entry_text)  # normalize whitespace
+            entry_text = re.sub(r"\s+", " ", entry_text)
 
-            ref = Reference(
-                raw_text=entry_text,
-                ref_number=int(num_str),
-            )
+            ref = Reference(raw_text=entry_text, ref_number=int(num_str))
 
-            # Try to extract arxiv ID from the reference text
             arxiv_ids = extract_arxiv_ids_from_text(entry_text)
             if arxiv_ids:
                 ref.arxiv_id = arxiv_ids[0]
 
-            # Try to extract year
             year_match = re.search(r"\b(19|20)\d{2}\b", entry_text)
             if year_match:
                 ref.year = year_match.group(0)
 
             references.append(ref)
     else:
-        # Fallback: just extract any arxiv IDs from the reference section
+        # Fallback: extract arxiv IDs from reference section
         arxiv_ids = extract_arxiv_ids_from_text(ref_text)
         for aid in arxiv_ids:
             references.append(Reference(raw_text=aid, arxiv_id=aid))
@@ -148,25 +128,31 @@ def extract_references(text: str) -> tuple[list[Reference], str | None]:
     return references, ref_text
 
 
-def parse_pdf(pdf_path: Path, arxiv_id: str) -> ParsedPaper:
-    """Parse a PDF and extract structured information.
+def parse_paper(arxiv_id: str, text: str) -> ParsedPaper:
+    """Parse extracted paper text into structured form.
 
     Args:
-        pdf_path: Path to the PDF file.
-        arxiv_id: The arxiv ID of the paper.
+        arxiv_id: The paper's arxiv ID.
+        text: Clean text from NeMo Curator's LaTeX extraction.
 
     Returns:
-        ParsedPaper with text, title, abstract, and references.
+        ParsedPaper with title, abstract, and references.
     """
-    text = extract_text(pdf_path)
     title = extract_title(text)
     abstract = extract_abstract(text)
     references, ref_section = extract_references(text)
 
+    # Also scan full text for arxiv IDs not caught in references section
+    all_ids = set(extract_arxiv_ids_from_text(text))
+    ref_ids = {r.arxiv_id for r in references if r.arxiv_id}
+    missed_ids = all_ids - ref_ids - {arxiv_id}  # exclude self-references
+    for aid in missed_ids:
+        references.append(Reference(raw_text=f"(inline citation: {aid})", arxiv_id=aid))
+
     logger.info(
         "Parsed %s: title=%s, %d refs (%d with arxiv IDs)",
         arxiv_id,
-        title[:50] if title else None,
+        (title[:50] if title else None),
         len(references),
         sum(1 for r in references if r.arxiv_id),
     )

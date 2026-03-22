@@ -1,107 +1,137 @@
-"""Local PDF cache with arxiv download support.
+"""Local paper text cache backed by NeMo Curator's arxiv LaTeX extraction.
 
-Mirrors the OSM tile-cache pattern: check local path first, fetch on miss.
-PDFs are stored at: {cache_dir}/{arxiv_id}.pdf
-where arxiv_id has slashes replaced with underscores (e.g., 2401.12345 -> 2401.12345.pdf).
+Two-tier design:
+  1. Bulk preload: Use NeMo Curator's `download_arxiv()` to bulk-download arxiv
+     tar bundles from S3, extract LaTeX → clean text, index by arxiv_id.
+  2. Lookup: Crawler checks the index. Papers without LaTeX source are skipped
+     (filter condition: must be on arxiv AND have LaTeX source available).
+
+The index is a directory of JSONL files produced by NeMo Curator, plus a
+fast in-memory dict mapping arxiv_id → extracted text.
 """
 
+import json
 import logging
-import time
-import urllib.request
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-ARXIV_PDF_URL = "https://arxiv.org/pdf/{arxiv_id}"
-# arxiv rate limit: be polite
-FETCH_DELAY_S = 3.0
-MAX_RETRIES = 3
-
 
 class PaperCache:
-    """Filesystem-backed PDF cache with arxiv auto-download."""
+    """In-memory index over NeMo Curator's extracted arxiv LaTeX text."""
 
     def __init__(self, cache_dir: str | Path):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self._last_fetch_time: float = 0.0
+        # arxiv_id -> {"text": ..., "source_id": ..., "file_name": ...}
+        self._index: dict[str, dict] = {}
+        self._loaded = False
 
-    def _pdf_path(self, arxiv_id: str) -> Path:
-        safe_id = arxiv_id.replace("/", "_")
-        return self.cache_dir / f"{safe_id}.pdf"
+    def _index_path(self) -> Path:
+        return self.cache_dir / "paper_index.json"
+
+    def load_index(self):
+        """Load the paper index from disk."""
+        idx_path = self._index_path()
+        if idx_path.exists():
+            with open(idx_path) as f:
+                self._index = json.load(f)
+            logger.info("Loaded index with %d papers from %s", len(self._index), idx_path)
+        self._loaded = True
+
+    def save_index(self):
+        """Persist the paper index to disk."""
+        with open(self._index_path(), "w") as f:
+            json.dump(self._index, f)
+        logger.info("Saved index with %d papers to %s", len(self._index), self._index_path())
+
+    def ingest_curator_output(self, curator_output_dir: str | Path):
+        """Ingest JSONL files produced by NeMo Curator's download_arxiv().
+
+        Each line in the JSONL has: {"text": ..., "id": ..., "source_id": ..., "file_name": ...}
+        We index by the "id" field (arxiv ID).
+        """
+        curator_dir = Path(curator_output_dir)
+        count = 0
+        for jsonl_path in sorted(curator_dir.glob("*.jsonl")):
+            with open(jsonl_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    record = json.loads(line)
+                    arxiv_id = record.get("id", "")
+                    if not arxiv_id:
+                        continue
+                    text = record.get("text", "")
+                    if not text or len(text) < 100:
+                        # Skip papers with essentially no extractable text
+                        continue
+                    self._index[arxiv_id] = {
+                        "text": text,
+                        "source_id": record.get("source_id", ""),
+                        "file_name": record.get("file_name", ""),
+                    }
+                    count += 1
+        logger.info("Ingested %d papers from %s (total index: %d)", count, curator_dir, len(self._index))
+        self._loaded = True
+
+    def bulk_download(
+        self,
+        output_dir: str | Path | None = None,
+        url_limit: int | None = None,
+        record_limit: int | None = None,
+    ):
+        """Run NeMo Curator's arxiv bulk download, then ingest the output.
+
+        Requires s5cmd configured for arxiv S3 access.
+        """
+        from nemo_curator.download import download_arxiv
+
+        out = Path(output_dir) if output_dir else self.cache_dir / "curator_raw"
+        out.mkdir(parents=True, exist_ok=True)
+
+        logger.info("Starting NeMo Curator arxiv bulk download to %s", out)
+        dataset = download_arxiv(
+            output_path=str(out),
+            output_type="jsonl",
+            keep_raw_download=False,
+            force_download=False,
+            url_limit=url_limit,
+            record_limit=record_limit,
+        )
+        # Write out the dataset
+        dataset.to_json(output_path=str(out), write_to_filename=True)
+        logger.info("Bulk download complete, ingesting...")
+        self.ingest_curator_output(out)
+        self.save_index()
 
     def has(self, arxiv_id: str) -> bool:
-        """Check if PDF is already cached locally."""
-        path = self._pdf_path(arxiv_id)
-        return path.exists() and path.stat().st_size > 0
+        """Check if paper text is available in the index."""
+        if not self._loaded:
+            self.load_index()
+        return arxiv_id in self._index
 
-    def get_path(self, arxiv_id: str) -> Path | None:
-        """Return local path if cached, else None."""
-        if self.has(arxiv_id):
-            return self._pdf_path(arxiv_id)
-        return None
+    def get_text(self, arxiv_id: str) -> str | None:
+        """Get extracted paper text by arxiv ID. Returns None if not available."""
+        if not self._loaded:
+            self.load_index()
+        entry = self._index.get(arxiv_id)
+        return entry["text"] if entry else None
 
-    def _rate_limit(self):
-        """Respect arxiv rate limits."""
-        elapsed = time.time() - self._last_fetch_time
-        if elapsed < FETCH_DELAY_S:
-            time.sleep(FETCH_DELAY_S - elapsed)
+    def get_metadata(self, arxiv_id: str) -> dict | None:
+        """Get full cached record for a paper."""
+        if not self._loaded:
+            self.load_index()
+        return self._index.get(arxiv_id)
 
-    def fetch(self, arxiv_id: str, force: bool = False) -> Path:
-        """Download PDF from arxiv if not cached. Returns local path.
+    def available_ids(self) -> set[str]:
+        """Return set of all arxiv IDs with LaTeX source available."""
+        if not self._loaded:
+            self.load_index()
+        return set(self._index.keys())
 
-        Args:
-            arxiv_id: e.g. "2401.12345" or "cs/0601001"
-            force: re-download even if cached
-
-        Returns:
-            Path to the local PDF file.
-
-        Raises:
-            RuntimeError: if download fails after retries.
-        """
-        path = self._pdf_path(arxiv_id)
-        if not force and self.has(arxiv_id):
-            logger.debug("Cache hit: %s", arxiv_id)
-            return path
-
-        url = ARXIV_PDF_URL.format(arxiv_id=arxiv_id)
-        logger.info("Downloading %s -> %s", url, path)
-
-        for attempt in range(1, MAX_RETRIES + 1):
-            self._rate_limit()
-            try:
-                urllib.request.urlretrieve(url, path)
-                self._last_fetch_time = time.time()
-                if path.stat().st_size > 0:
-                    logger.info("Downloaded %s (%d bytes)", arxiv_id, path.stat().st_size)
-                    return path
-                else:
-                    logger.warning("Empty file for %s, retrying", arxiv_id)
-                    path.unlink(missing_ok=True)
-            except Exception as e:
-                logger.warning("Attempt %d/%d failed for %s: %s", attempt, MAX_RETRIES, arxiv_id, e)
-                backoff = 2**attempt
-                time.sleep(backoff)
-
-        raise RuntimeError(f"Failed to download {arxiv_id} after {MAX_RETRIES} attempts")
-
-    def fetch_batch(self, arxiv_ids: list[str], force: bool = False) -> dict[str, Path]:
-        """Download multiple papers, skipping already-cached ones.
-
-        Returns:
-            Dict mapping arxiv_id -> local path for successfully fetched papers.
-        """
-        results = {}
-        skipped = 0
-        for arxiv_id in arxiv_ids:
-            if not force and self.has(arxiv_id):
-                results[arxiv_id] = self._pdf_path(arxiv_id)
-                skipped += 1
-                continue
-            try:
-                results[arxiv_id] = self.fetch(arxiv_id, force=force)
-            except RuntimeError:
-                logger.error("Skipping %s after download failure", arxiv_id)
-        logger.info("Batch complete: %d fetched, %d cached, %d failed", len(results) - skipped, skipped, len(arxiv_ids) - len(results))
-        return results
+    def __len__(self) -> int:
+        if not self._loaded:
+            self.load_index()
+        return len(self._index)
