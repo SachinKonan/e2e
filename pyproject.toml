@@ -28,11 +28,19 @@ dependencies = [
   "zarr>=3.0.4",
 ]
 
+[project.optional-dependencies]
+crawler = [
+  "nemo-curator>=0.9",
+  "openai>=1.0",
+  "pymupdf>=1.24",
+]
+
 [project.scripts]
 train = "ttt.train:main"
+crawl-papers = "paper_crawler.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["ttt", "hydra_plugins"]
+include = ["ttt", "hydra_plugins", "paper_crawler"]
 
 [tool.uv]
 package = true
