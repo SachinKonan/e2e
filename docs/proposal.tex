@@ -1,0 +1,140 @@
+\documentclass{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage[backend=biber, style=apa]{biblatex}
+\addbibresource{references.bib}
+
+\title{AutoReview: Learning Research Taste Through\\Large-Context Synthetic Literature Review}
+\author{Sachin Konan}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Scientific discovery requires two distinct capabilities: solving well-defined problems, and identifying which problems are worth solving in the first place. While recent advances in long chain-of-thought reasoning, generator-verifier paradigms, and coding agents have made substantial progress on the former, the latter---what we term \textit{research taste}---remains poorly understood and largely unaddressed. We argue that research taste is a learnable capability, but one that current pretraining and midtraining data fails to capture, because it is embodied in an author's \textit{thought process} during literature review rather than in the final artifact of a published paper. We propose \textbf{AutoReview}, a pipeline for large-context synthetic data generation that reconstructs the intermediate reasoning behind literature review: how researchers traverse citation graphs, identify gaps across disparate lines of work, evaluate which gaps are important, and connect those gaps to novel methods. By crawling arxiv papers via LLM-guided citation ranking and annotating each traversal with structured chain-of-thought, we aim to produce training data that teaches models to ask the right questions---not just answer them.
+\end{abstract}
+
+\section{Introduction}
+
+Scientific discovery has two sides to the same coin. One side---the one receiving the most attention---is the question: \textit{given a well-defined problem, how do I solve it?} There is a growing body of work from Google DeepMind \parencite{trinh2024alphageometry, romera-paredes2024funsearch}, OpenAI \parencite{openai2024o1}, and others on solving existing problems through deep reasoning, long chain-of-thought inference, and generator-verifier paradigms. This is important work and should continue. But it also feels like a capability that, in principle, yields to greater scale: better code agents, longer inference budgets, and more compute will steadily improve a model's ability to solve problems that humans can already verify.
+
+What seems less clear---and potentially more important---is the other side of the coin: \textit{can AI identify which questions are worth asking?}
+
+This matters because asking the right questions dramatically reduces search time for novel, important insight. The best researchers exhibit what is colloquially called ``research taste'': they pick areas, develop methods, and frame contributions that get at the core or central dogma of what the broader community cares about---sometimes before the community itself recognizes it. Research taste is what separates a technically competent paper from a field-defining one.
+
+With standard next-token prediction on scientific corpora, we learn a model of $P(\text{this work} \mid \text{prior work})$---essentially, the distribution over published papers given the literature. But this only captures \textit{outcomes}, not the \textit{process} that produced them. What is missing is the intermediate reasoning: the questions an author asked when reading dozens of related papers, the gaps they noticed between different lines of work, why they judged those gaps to be important (or not), and how that judgment eventually led to their novel contribution.
+
+We hypothesize that this process can be reconstructed synthetically. By crawling citation graphs with LLM-guided ranking and generating structured annotations at each step---summaries, gap analyses, importance judgments, and connection hypotheses---we can produce training data that simulates the thought process of literature review at scale. This is fundamentally a \textbf{long-context problem}: a researcher reads many papers, maintains a running mental model of the field, accumulates intermediate reasoning over hundreds of thousands of tokens, and only then arrives at a research direction. Capturing this requires both (a) large-context synthetic data and (b) models capable of reasoning over that context during training and inference.
+
+\section{Related Work}
+
+\subsection{Scientific Discovery with Language Models}
+
+Recent work has demonstrated that language models can contribute to scientific discovery in several capacities. \textcite{lu2024aiscientist} introduced ``The AI Scientist,'' an end-to-end system for automated scientific discovery that generates research ideas, writes code, runs experiments, and produces manuscripts. While impressive as an integrated system, it operates primarily in the problem-solving mode---given an area, generate and test ideas---rather than addressing the upstream question of which areas to investigate.
+
+FunSearch \parencite{romera-paredes2024funsearch} demonstrated that LLMs paired with evolutionary search can discover new mathematical results, and AlphaGeometry \parencite{trinh2024alphageometry} solved olympiad-level geometry problems through neurosymbolic reasoning. These represent the ``solving'' paradigm: the problem is given, the challenge is finding the solution.
+
+On the reasoning side, OpenAI's o1 \parencite{openai2024o1} and subsequent work on long chain-of-thought inference have shown that extended reasoning at test time can dramatically improve problem-solving performance. This aligns with the generator-verifier paradigm where solutions can be checked, and more compute at inference yields better results.
+
+\subsection{Citation Prediction and Analysis}
+
+Citation prediction---forecasting which papers will be cited by a given work---has been studied using metadata features (author profiles, venue, recency), graph-based features (citation network topology), and increasingly, content-based features from language models.
+
+ForeCite \parencite{dukic2024forecite} frames citation prediction as a language modeling task, using the full text of a paper to predict its references. This is close to our setting, but operates at the level of prediction (which papers \textit{will} be cited) rather than prescription (which papers \textit{should} be read and why).
+
+\subsection{Synthetic Data for Reasoning}
+
+There is growing evidence that synthetic data can teach models to reason in ways that natural data cannot. Chain-of-thought distillation \parencite{wei2022chainofthought}, self-play \parencite{chen2024selfplay}, and process reward models \parencite{lightman2023letsverify} all demonstrate that making intermediate reasoning explicit in training data improves downstream reasoning capability. Our work extends this intuition to the domain of scientific literature review, where the ``chain of thought'' is the trajectory through a citation graph annotated with gap analysis and importance judgments.
+
+\subsection{Long-Context Language Models}
+
+Our approach is inherently a long-context problem. Recent advances in extending context windows---including Test-Time Training \parencite{sun2024ttt}, ring attention \parencite{liu2023ring}, and various position encoding extensions---make it feasible to train on the multi-paper, multi-hop reasoning traces we aim to generate. The synthetic data we produce is specifically designed to exercise long-range dependencies: connecting an insight from paper A (read early in the review) to a gap identified in paper F (read much later), requiring the model to maintain and update a mental model over hundreds of thousands of tokens.
+
+\section{Proposed Approach}
+
+\subsection{Overview}
+
+AutoReview consists of three stages:
+
+\begin{enumerate}
+    \item \textbf{Citation Graph Crawl}: Starting from seed papers, recursively discover related work via LLM-ranked citation traversal. This produces a tree of papers with parent-child relationships and ranking rationale.
+    \item \textbf{Synthetic Annotation}: For each paper and each edge in the citation tree, generate structured chain-of-thought annotations: summaries, gap analyses, importance judgments, and inter-paper connections.
+    \item \textbf{Long-Context Data Assembly}: Compose the annotated traversals into long-context training sequences that simulate a researcher's literature review process, from initial reading through gap identification to research question formulation.
+\end{enumerate}
+
+\subsection{Stage 1: LLM-Guided Citation Crawl}
+
+We build on the arxiv corpus via two data sources:
+
+\begin{itemize}
+    \item \textbf{Kaggle Arxiv Metadata}: The Cornell University arxiv dataset provides title, abstract, authors, and categories for the full arxiv corpus. This serves as our resolution index---given a reference title, we can map it to an arxiv ID.
+    \item \textbf{Per-Paper LaTeX Source}: For each paper we visit, we download its LaTeX source from \texttt{arxiv.org/src/\{id\}}, extract \texttt{.tex}, \texttt{.bib}, and \texttt{.bbl} files, and parse structured references (title, author, year, arxiv eprint ID) via BibTeX parsing.
+\end{itemize}
+
+The crawl proceeds as breadth-first search. At each node (paper), we:
+\begin{enumerate}
+    \item Extract all references from the LaTeX source.
+    \item Resolve references to arxiv IDs (via the \texttt{eprint} field in \texttt{.bib}, or via title matching against the metadata index).
+    \item Present the paper's context (title, abstract) and its reference list to an LLM, which ranks references by importance and provides rationale for each ranking.
+    \item Follow the top-$K$ ranked references that have arxiv source available.
+\end{enumerate}
+
+This produces a citation tree rooted at each seed paper, where edges are annotated with the LLM's ranking rationale---an early form of the ``research taste'' signal we aim to distill.
+
+\subsection{Stage 2: Synthetic Annotation}
+
+For each paper in the crawl tree, we generate:
+
+\begin{itemize}
+    \item \textbf{Summary}: A concise description of the paper's core problem, methodology, and results.
+    \item \textbf{Gap Analysis}: Given the paper and its parent in the citation tree, what questions does this paper leave open? What assumptions does it make that could be challenged?
+    \item \textbf{Importance Judgment}: Why might these gaps matter? Which gaps, if addressed, would constitute a meaningful contribution?
+    \item \textbf{Cross-Paper Connections}: Given multiple papers read so far in the traversal, what connections exist between their gaps, methods, or findings that the individual papers do not make explicit?
+\end{itemize}
+
+Critically, these annotations are generated \textit{in context}---the LLM sees not just the current paper but the accumulated reading history and prior annotations, simulating the growing mental model of a researcher mid-review.
+
+\subsection{Stage 3: Long-Context Assembly}
+
+The final training data takes the form of long sequences that interleave:
+
+\begin{enumerate}
+    \item Paper text (or summaries, depending on context budget)
+    \item Intermediate chain-of-thought: ``After reading this paper, I notice that...''
+    \item Gap annotations: ``This leaves open the question of...''
+    \item Cross-paper reasoning: ``Combining the insight from [A] with the limitation of [B] suggests...''
+    \item Research question formulation: ``A promising direction would be...''
+\end{enumerate}
+
+The target signal for training is the final research question or direction, but the intermediate annotations provide the process supervision that teaches the model \textit{how} to arrive at good questions---not just what good questions look like.
+
+\section{Evaluation}
+
+Evaluating ``research taste'' is inherently difficult, as it requires judging the quality of questions rather than answers. We propose several complementary evaluation strategies:
+
+\begin{itemize}
+    \item \textbf{Retrospective Citation Prediction}: Given a paper's references minus one, and the full text of the remaining references, can the model predict the held-out citation? More importantly, can it articulate \textit{why} that citation is relevant?
+    \item \textbf{Gap Identification}: Given a set of papers from a subfield circa year $Y$, can the model identify research directions that were actually pursued in year $Y+1$ or $Y+2$?
+    \item \textbf{Research Proposal Quality}: Human evaluation (by domain experts) of generated research directions, rated on novelty, feasibility, and importance.
+    \item \textbf{Blind Comparison}: Present experts with research directions generated by the model alongside directions from actual papers, and evaluate whether experts can distinguish them or rate them comparably.
+\end{itemize}
+
+\section{Connection to Test-Time Training}
+
+This work has a natural connection to test-time training (TTT). The literature review process is inherently adaptive: a researcher's understanding evolves \textit{as they read}. A model performing literature review benefits from updating its representations on the fly---exactly the setting where TTT excels. Long-context TTT methods that learn from the input sequence at inference time are well-suited to the kind of reasoning AutoReview demands: accumulating understanding over many papers and producing insights that depend on the full reading history.
+
+\section{Timeline and Milestones}
+
+\begin{enumerate}
+    \item \textbf{Data Infrastructure} (current): Citation crawl pipeline, LaTeX source caching, BibTeX parsing, Kaggle metadata index.
+    \item \textbf{Annotation Pipeline}: Implement Stage 2 synthetic annotation with gap analysis and cross-paper reasoning prompts.
+    \item \textbf{Data Generation}: Run crawls from curated seed sets across multiple subfields (ML, NLP, systems). Generate long-context training sequences.
+    \item \textbf{Training}: Fine-tune on assembled data. Compare against baselines trained on standard scientific text.
+    \item \textbf{Evaluation}: Run retrospective and human evaluation experiments.
+\end{enumerate}
+
+\printbibliography
+
+\end{document}
