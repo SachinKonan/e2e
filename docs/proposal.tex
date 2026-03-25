@@ -1,6 +1,7 @@
 \documentclass[10pt]{article}
 \usepackage[margin=0.85in]{geometry}
 \usepackage{graphicx}
+\usepackage{amsmath}
 \usepackage[backend=biber, style=apa]{biblatex}
 \usepackage{enumitem}
 \usepackage{titlesec}
@@ -41,11 +42,40 @@ For each paper, we generate structured CoT annotations \textit{in context}---the
 \textbf{Stage 3: Long-Context Megadoc Assembly.}
 Following \textcite{kim2025megadocs}, we compose traversal traces into long training sequences: paper text $\to$ intermediate CoT $\to$ gap annotations $\to$ cross-paper reasoning $\to$ research question formulation. The target is the final research direction; intermediate annotations provide process supervision. These are natural megadocs with latent-thought insertions between segments---exactly the structure yielding the largest long-context efficiency gains.
 
-\section{Training and Evaluation}
+\section{Training}
 
-\textbf{Training.} Continued pretraining on assembled megadoc sequences. A single example spans many papers with accumulated reasoning over hundreds of thousands of tokens. Test-time training is a natural fit: the model's understanding should evolve \textit{as it reads}, updating representations on the fly---exactly the setting where TTT methods excel. Hence T$^4$: test-time training for taste.
+Continued pretraining on assembled megadoc sequences. A single example spans many papers with accumulated reasoning over hundreds of thousands of tokens. Test-time training is a natural fit: the model's understanding should evolve \textit{as it reads}, updating representations on the fly---exactly the setting where TTT methods excel. Hence T$^4$: test-time training for taste.
 
-\textbf{Evaluation.} Four strategies: (1) \textit{Retrospective citation prediction}---hold out one reference, predict and explain why; (2) \textit{Gap identification}---given year-$Y$ papers, predict directions pursued at $Y{+}1$; (3) \textit{Proposal quality}---expert ratings on novelty, feasibility, importance; (4) \textit{Blind comparison}---experts distinguish generated vs.\ real research directions.
+The primary training objective is cross-entropy loss on the target tokens: given the full literature review trace (papers, intermediate CoT, gap analyses), predict the final research direction. Intermediate annotations also serve as auxiliary prediction targets, providing process supervision at each step of the reasoning chain.
+
+\section{Evaluation}
+
+Evaluating research taste is hard---it requires judging the quality of \textit{questions}, not answers. We propose a hierarchy of evaluation strategies, from cheap/automatic to expensive/definitive.
+
+\subsection{Intrinsic Metrics}
+
+\textbf{Cross-entropy on held-out directions.} The most direct metric: given a literature review context, measure CE loss on the actual research direction the author pursued. We construct held-out sets by taking real papers, reconstructing their citation context from our crawl data, and using the paper's actual contribution as the target. Lower CE means the model assigns higher probability to directions humans actually found worth pursuing.
+
+\textbf{Auxiliary tasks.} We evaluate on tasks that probe components of research taste independently: (a) \textit{retrospective citation prediction}---hold out one reference from a paper's bibliography, predict which paper is missing and why it's relevant; (b) \textit{gap identification}---given papers from a subfield at year $Y$, predict research directions actually pursued in $Y{+}1$ or $Y{+}2$; (c) \textit{importance ranking}---given a set of open questions extracted from recent papers, rank them by how much follow-up work they actually generated.
+
+\subsection{LLM-as-Judge}
+
+We use a strong LLM (e.g., Claude, GPT-4) to evaluate generated research directions on: (a) \textit{novelty}---does this direction differ meaningfully from existing work? (b) \textit{specificity}---is this concrete enough to act on, or is it vague hand-waving? (c) \textit{grounding}---does the direction follow logically from the gaps identified in the literature? (d) \textit{feasibility}---could a competent researcher actually execute this? This gives us a scalable proxy for expert judgment that we can run on thousands of generated directions.
+
+\subsection{End-to-End: Generate $\to$ Execute $\to$ Judge}
+
+The strongest evaluation closes the loop entirely. Given a generated research direction:
+\begin{enumerate}
+    \item \textbf{Generate}: the model produces a concrete research idea with methodology, expected results, and contribution statement---essentially a mini-proposal.
+    \item \textbf{Execute}: a code agent (e.g., AI Scientist-style) attempts to implement the idea---runs experiments, generates figures, writes up results.
+    \item \textbf{Judge}: we feed the resulting paper through a \textit{conference acceptance model}---a classifier trained on accept/reject decisions from real venues. This gives us a scalar reward signal: did the generated direction lead to work that looks like it would be accepted?
+\end{enumerate}
+
+This creates a generator-verifier loop for research taste. The acceptance model serves as a learned verifier that captures the implicit standards of the research community. Crucially, this evaluates the \textit{full pipeline}---not just whether the model can identify interesting gaps, but whether those gaps lead to executable, publishable contributions. We can also use the acceptance model's score as a reward signal for RLHF-style fine-tuning, iteratively improving the model's taste by optimizing for directions that produce high-quality papers.
+
+\subsection{Human Expert Evaluation}
+
+As a final check, we run blind comparisons: present domain experts with research directions generated by T$^4$ alongside directions from actual papers (extracted from their introductions/abstracts), and measure (a) whether experts can distinguish generated from real, and (b) comparative ratings on novelty, feasibility, and importance. This is expensive but necessary to validate that automatic metrics correlate with genuine research quality.
 
 \printbibliography
 
