@@ -1,15 +1,18 @@
-\documentclass{article}
+\documentclass[10pt]{article}
 \usepackage[margin=0.85in]{geometry}
 \usepackage{graphicx}
 \usepackage[backend=biber, style=apa]{biblatex}
 \usepackage{enumitem}
 \usepackage{titlesec}
-\setlist{nosep, leftmargin=*}
-\titlespacing*{\section}{0pt}{8pt}{4pt}
-\titlespacing*{\subsection}{0pt}{6pt}{2pt}
+\usepackage{parskip}
+\setlength{\parskip}{3pt plus 1pt}
+\setlength{\parindent}{0pt}
+\setlist{nosep, leftmargin=*, topsep=2pt}
+\titlespacing*{\section}{0pt}{6pt}{2pt}
+\titlespacing*{\subsection}{0pt}{4pt}{1pt}
 \addbibresource{references.bib}
 
-\title{\vspace{-1.5cm}AutoReview: Learning Research Taste Through Synthetic Literature Review\vspace{-0.3cm}}
+\title{\vspace{-2cm}\Large T$^4$: Test-Time Training for Taste\\\normalsize\textit{Learning Research Reasoning Through Synthetic Literature Review}\vspace{-0.5cm}}
 \author{Sachin Konan}
 \date{}
 
@@ -19,46 +22,30 @@
 
 \section{Motivation}
 
-Scientific discovery requires two capabilities: \textit{solving} well-defined problems, and \textit{identifying} which problems are worth solving. Recent work has made rapid progress on the first---long chain-of-thought reasoning, generator-verifier paradigms, and code agents are steadily improving at solving problems humans can already state and verify. We think the second capability---what we call \textit{research taste}---is harder and less explored.
+Scientific discovery requires two capabilities: \textit{solving} problems, and \textit{identifying} which problems are worth solving. Recent progress on the first---long chain-of-thought, generator-verifier paradigms, code agents---is real, but also feels like it yields to scale: more compute and longer inference budgets steadily improve problem-solving on tasks humans can verify. The second capability, \textit{research taste}, is harder. The best researchers pick problems and connect ideas in ways that define fields, sometimes before anyone else sees the importance. Standard pretraining learns $P(\text{paper} \mid \text{literature})$---the distribution over outcomes---but not the \textit{process}: questions asked while reading related work, gaps noticed between lines of work, and why certain gaps were judged worth pursuing.
 
-Research taste is what separates technically competent work from field-defining contributions. The best researchers identify problems, develop framings, and connect disparate ideas in ways that get at the core of what the broader community cares about, sometimes before anyone else recognizes it. With standard next-token prediction on scientific corpora we learn $P(\text{paper} \mid \text{literature})$---the distribution over published outcomes. But this captures only the \textit{artifact}, not the \textit{process}: the questions a researcher asked while reading dozens of related papers, the gaps they noticed between different lines of work, and why they judged those gaps worth pursuing.
+Recent synthetic data methods give us the tools. \textcite{yang2024entigraph} show that knowledge rearrangement---synthesizing diverse representations of facts via entity-graph traversal---dramatically outperforms naive continued pretraining (1.3M$\to$455M tokens, QA accuracy 39.5\%$\to$56.2\%). \textcite{yang2025sbp} scale this to general pretraining by modeling $P(d_2 \mid d_1)$ across document pairs, recovering 58\% of a 20$\times$-data oracle at 1T tokens. \textcite{kim2025megadocs} show that organizing synthetic data into long megadocuments yields 1.80$\times$ data efficiency, with gains substantially larger on long-context evaluation. \textcite{dong2024annualbert} demonstrate scientific evolution is modelable: chronological BERT on 1.75M arXiv papers achieves 0.991 AUC on citation prediction with smooth temporal weight trajectories.
 
-Recent work on synthetic pretraining data gives us the tools to address this. \textcite{yang2024entigraph} show that synthesizing diverse representations of domain knowledge via entity-graph traversal dramatically outperforms naive continued pretraining---the key is \textit{knowledge rearrangement}, presenting the same facts in varied contexts (1.3M tokens $\to$ 455M synthetic tokens, boosting QA accuracy from 39.5\% to 56.2\%). \textcite{yang2025sbp} extend this to general pretraining, modeling $P(d_2 \mid d_1)$ across document pairs and recovering 58\% of a 20$\times$-data oracle at 1T-token scale. \textcite{kim2025megadocs} show that \textit{how} you organize synthetic data matters: stitching related generations into long ``megadocuments'' yields 1.80$\times$ data efficiency, with benefits substantially larger on long-context evaluation. And \textcite{dong2024annualbert} demonstrate that scientific evolution itself is modelable---chronological BERT models trained year-by-year on 1.75M arXiv papers achieve 0.991 AUC on citation prediction and reveal smooth temporal trajectories in weight space.
+\textbf{The gap:} these methods improve knowledge acquisition or predict citations, but none capture the intermediate reasoning of literature review. We want to synthesize \textit{that process} as training data.
 
-\textbf{The gap:} these methods improve knowledge acquisition or predict citations, but none capture the \textit{intermediate reasoning} of literature review---the thought process where a researcher reads papers, identifies gaps, judges importance, and formulates new questions. We want to synthesize that process as training data.
+\section{Approach: AutoReview Pipeline}
 
-\section{Approach}
+We reconstruct research reasoning trajectories from arXiv and assemble them into long-context synthetic training data in three stages.
 
-We propose \textbf{AutoReview}, a pipeline that reconstructs research reasoning trajectories from the arXiv corpus and assembles them into long-context synthetic training data.
+\textbf{Stage 1: LLM-Guided Citation Crawl.}
+We use the Kaggle arXiv metadata corpus for title$\to$ID resolution and download per-paper LaTeX source from \texttt{arxiv.org/src/\{id\}}, extracting structured references via BibTeX/BBL parsing. The crawl is BFS over the citation graph: at each node, an LLM ranks references by importance with rationale, and we follow the top-$K$ that have arXiv source. This produces a citation tree where edges carry explicit signals about \textit{why} to follow each citation.
 
-\subsection{Stage 1: LLM-Guided Citation Crawl}
+\textbf{Stage 2: Synthetic Annotation.}
+For each paper, we generate structured CoT annotations \textit{in context}---the LLM sees accumulated reading history: (a) \textit{summary}---core problem, method, result; (b) \textit{gap analysis}---open questions and challengeable assumptions; (c) \textit{importance judgment}---which gaps would be meaningful contributions; (d) \textit{cross-paper connections}---links between gaps/methods/findings across papers not made explicit individually. This is EntiGraph-style knowledge rearrangement, but over scientific judgment rather than domain facts.
 
-We combine two data sources: (a) the Kaggle arXiv metadata corpus (title, abstract, categories for the full arXiv listing---used for title$\to$ID resolution), and (b) per-paper LaTeX source downloaded from \texttt{arxiv.org/src/\{id\}}, from which we extract structured references via BibTeX/BBL parsing (cite keys, titles, authors, \texttt{eprint} fields).
-
-The crawl is breadth-first search over the citation graph. At each node, we present the paper's context and its extracted references to an LLM, which ranks references by importance and provides rationale. We follow the top-$K$ ranked references that have arXiv source available. This produces a citation tree where each edge carries a ranking reason---an explicit signal about \textit{why} a researcher would follow that citation.
-
-\subsection{Stage 2: Synthetic Annotation}
-
-For each paper in the tree, we generate structured chain-of-thought annotations \textit{in context}---the LLM sees the accumulated reading history, not just the current paper:
-
-\begin{itemize}
-    \item \textbf{Summary}: core problem, methodology, key result.
-    \item \textbf{Gap analysis}: what questions does this paper leave open? What assumptions could be challenged?
-    \item \textbf{Importance judgment}: which gaps, if addressed, would constitute meaningful contributions and why?
-    \item \textbf{Cross-paper connections}: what links exist between gaps, methods, or findings across papers read so far that the individual papers don't make explicit?
-\end{itemize}
-
-This is the analog of EntiGraph's entity-relation synthesis, but over research reasoning: we're rearranging \textit{scientific judgment} into diverse, explicit representations.
-
-\subsection{Stage 3: Long-Context Megadoc Assembly}
-
-Following the megadoc principle \parencite{kim2025megadocs}, we compose traversal traces into long training sequences that interleave: paper text (or compressed summaries) $\to$ intermediate chain-of-thought $\to$ gap annotations $\to$ cross-paper reasoning $\to$ research question formulation. The target is the final research direction; the intermediate annotations provide process supervision. These are natural megadocs: coherent multi-paper sequences with latent-thought insertions between segments, exactly the structure that yields the largest efficiency gains on long-context evaluation.
+\textbf{Stage 3: Long-Context Megadoc Assembly.}
+Following \textcite{kim2025megadocs}, we compose traversal traces into long training sequences: paper text $\to$ intermediate CoT $\to$ gap annotations $\to$ cross-paper reasoning $\to$ research question formulation. The target is the final research direction; intermediate annotations provide process supervision. These are natural megadocs with latent-thought insertions between segments---exactly the structure yielding the largest long-context efficiency gains.
 
 \section{Training and Evaluation}
 
-\textbf{Training.} We perform continued pretraining on the assembled megadoc sequences. This is inherently a long-context problem---a single training example spans many papers with accumulated intermediate reasoning over hundreds of thousands of tokens. Test-time training is a natural fit: the model's understanding should evolve \textit{as it reads}, updating representations on the fly rather than relying solely on fixed pretrained weights.
+\textbf{Training.} Continued pretraining on assembled megadoc sequences. A single example spans many papers with accumulated reasoning over hundreds of thousands of tokens. Test-time training is a natural fit: the model's understanding should evolve \textit{as it reads}, updating representations on the fly---exactly the setting where TTT methods excel. Hence T$^4$: test-time training for taste.
 
-\textbf{Evaluation.} We propose four complementary strategies: (1)~\textit{Retrospective citation prediction}---hold out one reference from a paper, predict it and explain why it's relevant; (2)~\textit{Gap identification}---given papers from a subfield at year $Y$, predict research directions actually pursued in $Y{+}1$; (3)~\textit{Research proposal quality}---human expert ratings on novelty, feasibility, and importance of generated directions; (4)~\textit{Blind comparison}---present experts with generated directions alongside directions from actual papers and measure discriminability.
+\textbf{Evaluation.} Four strategies: (1) \textit{Retrospective citation prediction}---hold out one reference, predict and explain why; (2) \textit{Gap identification}---given year-$Y$ papers, predict directions pursued at $Y{+}1$; (3) \textit{Proposal quality}---expert ratings on novelty, feasibility, importance; (4) \textit{Blind comparison}---experts distinguish generated vs.\ real research directions.
 
 \printbibliography
 

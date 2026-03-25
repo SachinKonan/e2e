@@ -5,3 +5,11 @@ wandb
 outputs
 multirun
 experiments
+# LaTeX build artifacts
+docs/*.aux
+docs/*.bbl
+docs/*.bcf
+docs/*.blg
+docs/*.log
+docs/*.run.xml
+docs/*.pdf
