@@ -1,5 +1,5 @@
 \documentclass[10pt]{article}
-\usepackage[margin=0.75in]{geometry}
+\usepackage[margin=0.75in, top=0.6in, bottom=0.6in]{geometry}
 \usepackage{graphicx}
 \usepackage{amsmath}
 \usepackage[backend=biber, style=apa]{biblatex}
@@ -85,14 +85,16 @@ Following \textcite{kim2025megadocs}, I interleave paper content with annotation
 
 Real information streams are long and noisy. There are two approaches to handling irrelevant context: (a)~\textit{retrieval}---filter the stream before the model sees it, or (b)~\textit{selective absorption}---let the model consume everything and learn what to attend to. I plan to test both, but TTT is specifically the answer to (b).
 
-\textbf{Inner loop (test-time).} The model processes the megadoc sequence via gradient-based self-supervised learning, minimizing cross-entropy on content tokens. The model's parameters \textit{adapt} to the literature review trajectory, absorbing each paper and its annotations into its weights. Irrelevant noise papers contribute less useful gradient signal; the model must learn to selectively update its representations based on what will matter for the downstream idea.
+\textbf{Inner loop (test-time).} The model processes the megadoc via gradient-based self-supervised learning, minimizing cross-entropy on content tokens. Its parameters \textit{adapt} to the literature review trajectory, absorbing each paper and its annotations into its weights. Noise papers contribute less useful gradient signal; the model must learn to selectively update based on what will matter downstream.
 
-\textbf{Outer loop (meta-learning).} After the inner loop processes the full sequence, I collect all accumulated annotations and present them alongside the adapted model's representations. The outer loss is cross-entropy on the target research idea. The meta-gradient flows through the inner loop, training the model to absorb information during reading in a way that maximally helps it generate good research directions afterward. This directly addresses needle-in-a-haystack: the outer loop rewards inner-loop updates that selectively encode relevant information, even when buried among irrelevant papers.
+\textbf{Outer loop (meta-learning).} After the inner loop processes the full sequence, I collect all accumulated annotations and present them alongside the adapted model's representations. The outer loss is cross-entropy on the target research idea. The meta-gradient flows through the inner loop, training the model to absorb information during reading in a way that helps it generate good directions afterward. This directly addresses needle-in-a-haystack: the outer loop rewards inner-loop updates that selectively encode relevant information, even when buried among noise.
+
+\textbf{Practical constraints.} I assume $\sim$1M arXiv papers ($\sim$half the corpus), each markdown-converted to $\sim$15K tokens. A megadoc with 10 relevant papers, 5 noise papers, and annotations runs $\sim$250K tokens---well within the regime where TTT shows its advantage over fixed-context transformers. For the base model, I start from the pretrained TTT-3B checkpoint \parencite{sun2024ttt} and perform continued pretraining on the assembled megadocs. TTT-3B already implements the inner-loop self-supervised update; I am training it on data designed to reward selective absorption over long sequences. The annotation pipeline generates $\sim$1.4B synthetic tokens (at 1M papers), giving a total training corpus of $\sim$15--20B tokens.
 
 \section{Evaluation}
 
-Evaluating research taste requires judging the quality of \textit{questions}, not answers. I propose four strategies: (1)~\textit{Intrinsic}---cross-entropy on held-out research directions, plus auxiliary tasks (retrospective citation prediction, gap identification across years, importance ranking by actual follow-up work). (2)~\textit{LLM-as-Judge}---a strong LLM scores generated directions on novelty, specificity, grounding, and feasibility, scalable to thousands of outputs. (3)~\textit{Generate $\to$ Execute $\to$ Judge}---the model generates an idea, a code agent implements it, and I score the output with a conference acceptance model trained on real venue decisions---giving a scalar reward signal for RLHF. (4)~\textit{Human expert}---blind comparison where domain experts rate generated vs.\ real research directions.
+I propose four evaluation strategies: (1)~\textit{Intrinsic}---CE on held-out research directions, plus auxiliary tasks (citation prediction, gap identification across years, importance ranking by follow-up work). (2)~\textit{LLM-as-Judge}---a strong LLM scores generated directions on novelty, specificity, grounding, feasibility. (3)~\textit{Generate $\to$ Execute $\to$ Judge}---model generates idea, code agent implements it, conference acceptance model scores the output as RLHF reward. (4)~\textit{Human expert}---blind comparison of generated vs.\ real research directions.
 
-{\small\printbibliography}
+{\footnotesize\printbibliography}
 
 \end{document}
