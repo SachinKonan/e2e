@@ -6,12 +6,21 @@
 \usepackage{enumitem}
 \usepackage{titlesec}
 \usepackage{parskip}
+\usepackage{tikz}
+\usepackage{xcolor}
+\usepackage{tcolorbox}
+\usetikzlibrary{arrows.meta, positioning, fit, backgrounds}
 \setlength{\parskip}{3pt plus 1pt}
 \setlength{\parindent}{0pt}
 \setlist{nosep, leftmargin=*, topsep=2pt}
 \titlespacing*{\section}{0pt}{6pt}{2pt}
 \titlespacing*{\subsection}{0pt}{4pt}{1pt}
 \addbibresource{references.bib}
+
+\definecolor{paperblue}{HTML}{D6EAF8}
+\definecolor{annotgreen}{HTML}{D5F5E3}
+\definecolor{ideagold}{HTML}{FEF9E7}
+\definecolor{tttred}{HTML}{FADBD8}
 
 \title{\vspace{-2cm}\Large T$^4$: Test-Time Training for Taste\\\normalsize\textit{Learning Research Reasoning Through Synthetic Literature Review}\vspace{-0.5cm}}
 \author{Sachin Konan}
@@ -23,11 +32,13 @@
 
 \section{Motivation}
 
-Scientific discovery requires two capabilities: \textit{solving} problems, and \textit{identifying} which problems are worth solving. Recent progress on the first---long chain-of-thought, generator-verifier paradigms, code agents---is real, but also feels like it yields to scale: more compute and longer inference budgets steadily improve problem-solving on tasks humans can verify. The second capability, \textit{research taste}, is harder. The best researchers pick problems and connect ideas in ways that define fields, sometimes before anyone else sees the importance. Standard pretraining learns $P(\text{paper} \mid \text{literature})$---the distribution over outcomes---but not the \textit{process}: questions asked while reading related work, gaps noticed between lines of work, and why certain gaps were judged worth pursuing.
+A researcher's taste---their ability to identify which problems are worth solving---is shaped by a massive, heterogeneous stream of information: reading papers, attending talks, watching lectures, conversations with collaborators, browsing Twitter threads, reviewing code repositories. From this deluge, the best researchers extract signal: they notice gaps between lines of work, judge which gaps matter, and connect ideas that others haven't linked. The result is a research direction that feels inevitable in retrospect but required consuming and synthesizing enormous context to identify.
 
-Recent synthetic data methods give us the tools. \textcite{yang2024entigraph} show that knowledge rearrangement---synthesizing diverse representations of facts via entity-graph traversal---dramatically outperforms naive continued pretraining (1.3M$\to$455M tokens, QA accuracy 39.5\%$\to$56.2\%). \textcite{yang2025sbp} scale this to general pretraining by modeling $P(d_2 \mid d_1)$ across document pairs, recovering 58\% of a 20$\times$-data oracle at 1T tokens. \textcite{kim2025megadocs} show that organizing synthetic data into long megadocuments yields 1.80$\times$ data efficiency, with gains substantially larger on long-context evaluation. \textcite{dong2024annualbert} demonstrate scientific evolution is modelable: chronological BERT on 1.75M arXiv papers achieves 0.991 AUC on citation prediction with smooth temporal weight trajectories.
+\textit{Can we build models that do this?} The vision is a language model that consumes massive streams of scientific information and asks the right questions---not just answers them. Today, standard pretraining learns $P(\text{paper} \mid \text{literature})$, the distribution over published outcomes, but this captures only the artifact. The intermediate reasoning---why an author read 40 papers, dismissed most, noticed a specific gap between two, and judged it worth three years of work---is invisible in the training data.
 
-\textbf{The gap:} these methods improve knowledge acquisition or predict citations, but none capture the intermediate reasoning of literature review. We want to synthesize \textit{that process} as training data.
+Recent work on synthetic pretraining suggests this is tractable. Synthesizing diverse representations of knowledge via cross-document relationships consistently outperforms naive training on raw text: \textcite{yang2024entigraph} demonstrate that \textit{knowledge rearrangement}---generating varied representations of the same facts through entity-graph traversal---boosts QA accuracy from 39.5\% to 56.2\% where naive continued pretraining actually \textit{hurts} performance. \textcite{yang2025sbp} scale this principle to general pretraining by explicitly modeling inter-document conditionals $P(d_2 \mid d_1)$, recovering 58\% of a 20$\times$-data oracle at 1T-token scale. Crucially, \textcite{kim2025megadocs} show that \textit{how} synthetic data is organized matters as much as its content: stitching related generations into long megadocuments and inserting latent-thought rationales between segments yields 1.80$\times$ data efficiency, with benefits substantially larger on long-context evaluation. Meanwhile, \textcite{dong2024annualbert} demonstrate that scientific evolution itself has learnable structure---chronological BERT models on 1.75M arXiv papers achieve 0.991 AUC on citation prediction and reveal smooth temporal trajectories in weight space, suggesting the patterns underlying scientific progress are consistent enough to model.
+
+\textbf{The gap:} these methods improve knowledge acquisition or predict citations, but none capture the intermediate reasoning of literature review---the thought process where a researcher reads broadly, selectively attends to what matters, identifies gaps, and formulates questions. We want to synthesize \textit{that process} as training data, and train models that can consume long, noisy streams of scientific content and extract the right questions from them.
 
 \section{Approach: AutoReview Pipeline}
 
@@ -37,45 +48,57 @@ We reconstruct research reasoning trajectories from arXiv and assemble them into
 We use the Kaggle arXiv metadata corpus for title$\to$ID resolution and download per-paper LaTeX source from \texttt{arxiv.org/src/\{id\}}, extracting structured references via BibTeX/BBL parsing. The crawl is BFS over the citation graph: at each node, an LLM ranks references by importance with rationale, and we follow the top-$K$ that have arXiv source. This produces a citation tree where edges carry explicit signals about \textit{why} to follow each citation.
 
 \textbf{Stage 2: Synthetic Annotation.}
-For each paper, we generate structured CoT annotations \textit{in context}---the LLM sees accumulated reading history: (a) \textit{summary}---core problem, method, result; (b) \textit{gap analysis}---open questions and challengeable assumptions; (c) \textit{importance judgment}---which gaps would be meaningful contributions; (d) \textit{cross-paper connections}---links between gaps/methods/findings across papers not made explicit individually. This is EntiGraph-style knowledge rearrangement, but over scientific judgment rather than domain facts.
+For each paper, we generate structured CoT annotations \textit{in context}---the LLM sees accumulated reading history: (a) \textit{summary}---core problem, method, result; (b) \textit{gap analysis}---open questions and challengeable assumptions; (c) \textit{importance judgment}---which gaps would be meaningful contributions; (d) \textit{cross-paper connections}---links between gaps/methods/findings across papers not made explicit individually.
 
 \textbf{Stage 3: Long-Context Megadoc Assembly.}
-Following \textcite{kim2025megadocs}, we compose traversal traces into long training sequences: paper text $\to$ intermediate CoT $\to$ gap annotations $\to$ cross-paper reasoning $\to$ research question formulation. The target is the final research direction; intermediate annotations provide process supervision. These are natural megadocs with latent-thought insertions between segments---exactly the structure yielding the largest long-context efficiency gains.
+Following the megadoc principle \parencite{kim2025megadocs}, we interleave paper content with synthetic annotations into long training sequences. Figure~\ref{fig:stitching} illustrates the structure. Each paper is followed by its annotations (summary, gaps, questions), and after every few papers we insert cross-paper reasoning that connects ideas across the reading history. The sequence terminates with the target: the research idea that this literature review trajectory leads to. This mirrors the ``latent thoughts'' approach from \textcite{kim2025megadocs}---inserting reasoning between content segments---but our thoughts are research-specific: gap analyses and cross-paper connections rather than generic rationales.
 
-\section{Training}
+\begin{figure}[h]
+\centering
+\small
+\begin{tikzpicture}[
+    node distance=0.15cm,
+    block/.style={draw, rounded corners=2pt, minimum width=13.5cm, minimum height=0.55cm, font=\footnotesize\ttfamily, align=left},
+]
 
-Continued pretraining on assembled megadoc sequences. A single example spans many papers with accumulated reasoning over hundreds of thousands of tokens. Test-time training is a natural fit: the model's understanding should evolve \textit{as it reads}, updating representations on the fly---exactly the setting where TTT methods excel. Hence T$^4$: test-time training for taste.
+\node[block, fill=paperblue] (p1) {\textbf{Paper 1} (full text or compressed): ``Attention Is All You Need'' --- Vaswani et al. 2017};
+\node[block, fill=annotgreen, below=of p1] (a1) {\textbf{$\langle$annotation$\rangle$} Summary: introduces transformer... | Gaps: quadratic attention cost, no recurrence...};
+\node[block, fill=paperblue, below=of a1] (p2) {\textbf{Paper 2}: ``Efficient Transformers: A Survey'' --- Tay et al. 2022};
+\node[block, fill=annotgreen, below=of p2] (a2) {\textbf{$\langle$annotation$\rangle$} Summary: categorizes efficient attention... | Gaps: no unified theory of approximation quality...};
+\node[block, fill=paperblue, below=of a2] (p3) {\textbf{Paper 3}: ``Learning to (Learn at Test Time)'' --- Sun et al. 2024};
+\node[block, fill=annotgreen, below=of p3] (a3) {\textbf{$\langle$annotation$\rangle$} Summary: TTT replaces fixed hidden state... | Gaps: scaling to very long contexts...};
+\node[block, fill=tttred, below=of a3] (xp) {\textbf{$\langle$cross-paper$\rangle$} Papers 1+2 show attention is both powerful and costly; Paper 3 offers a different primitive...};
+\node[block, fill=paperblue, below=of xp] (p4) {\textbf{Paper 4}: ``Mamba: Linear-Time Sequence Modeling'' --- Gu \& Dao 2023};
+\node[block, fill=annotgreen, below=of p4] (a4) {\textbf{$\langle$annotation$\rangle$} Summary: selective SSM achieves... | Gaps: no test-time adaptation, fixed representations...};
+\node[block, fill=tttred, below=of a4] (xp2) {\textbf{$\langle$cross-paper$\rangle$} TTT (Paper 3) + SSM efficiency (Paper 4): can we get linear-time \textit{adaptive} sequence modeling?};
+\node[block, fill=ideagold, below=of xp2] (idea) {\textbf{$\langle$idea$\rangle$} \textit{Target}: TTT layers with SSM-structured updates for efficient long-context adaptive inference.};
 
-The primary training objective is cross-entropy loss on the target tokens: given the full literature review trace (papers, intermediate CoT, gap analyses), predict the final research direction. Intermediate annotations also serve as auxiliary prediction targets, providing process supervision at each step of the reasoning chain.
+\end{tikzpicture}
+\caption{Megadoc stitching structure. Papers (blue) are interleaved with per-paper annotations (green), periodic cross-paper reasoning (red), and a final research idea target (gold). Annotations serve as latent thoughts between content segments. During TTT inner-loop training, the model processes the full sequence; at meta-evaluation time, accumulated annotations are retained in memory alongside the updated model to predict the idea.}
+\label{fig:stitching}
+\end{figure}
+
+\section{Training: TTT for Taste}
+
+The key challenge is that real information streams are long and noisy---not every paper in a researcher's reading history is relevant to the idea they eventually pursue. There are two approaches to handling irrelevant context: (a) \textit{retrieval}: use a retriever to filter the stream before the model sees it, or (b) \textit{selective absorption}: let the model consume everything and learn to selectively attend to what matters. We plan to test both, but TTT is specifically the answer to (b).
+
+\textbf{Inner loop (test-time).} Given a megadoc sequence, the model processes papers and annotations via gradient-based self-supervised learning, minimizing cross-entropy on the content tokens. This is the TTT inner loop: the model's parameters \textit{adapt} to the specific literature review trajectory, absorbing the content of each paper and its annotations into its weights. Papers that are irrelevant to the eventual idea contribute less useful gradient signal; the model must learn to selectively update its representations based on what will matter downstream.
+
+\textbf{Outer loop (meta-learning).} The meta-objective evaluates the \textit{adapted} model: after the inner loop has processed the full paper sequence, we collect all accumulated annotations (summaries, gap analyses, cross-paper connections) and present them alongside the adapted model's representations. The outer loss is cross-entropy on the target research idea, given these annotations and the model state post-inner-loop. The meta-gradient flows through the inner loop, training the model to absorb information during reading in a way that maximally helps it generate good research directions afterward.
+
+This two-loop structure directly addresses the needle-in-a-haystack problem: the outer loop rewards inner-loop updates that selectively encode the information relevant to the final idea, even when that information is buried in a long stream of partially-relevant papers.
 
 \section{Evaluation}
 
-Evaluating research taste is hard---it requires judging the quality of \textit{questions}, not answers. We propose a hierarchy of evaluation strategies, from cheap/automatic to expensive/definitive.
+Evaluating research taste is hard---it requires judging the quality of \textit{questions}, not answers. We propose a hierarchy from cheap/automatic to expensive/definitive.
 
-\subsection{Intrinsic Metrics}
+\textbf{Intrinsic metrics.} Cross-entropy on held-out research directions: given a literature review context, measure loss on the actual direction the author pursued. Plus auxiliary tasks: retrospective citation prediction (hold out one reference, predict and explain), gap identification (predict year-$Y{+}1$ directions from year-$Y$ papers), and importance ranking (rank open questions by actual follow-up work generated).
 
-\textbf{Cross-entropy on held-out directions.} The most direct metric: given a literature review context, measure CE loss on the actual research direction the author pursued. We construct held-out sets by taking real papers, reconstructing their citation context from our crawl data, and using the paper's actual contribution as the target. Lower CE means the model assigns higher probability to directions humans actually found worth pursuing.
+\textbf{LLM-as-Judge.} A strong LLM scores generated directions on novelty, specificity, grounding, and feasibility---a scalable proxy we can run on thousands of outputs.
 
-\textbf{Auxiliary tasks.} We evaluate on tasks that probe components of research taste independently: (a) \textit{retrospective citation prediction}---hold out one reference from a paper's bibliography, predict which paper is missing and why it's relevant; (b) \textit{gap identification}---given papers from a subfield at year $Y$, predict research directions actually pursued in $Y{+}1$ or $Y{+}2$; (c) \textit{importance ranking}---given a set of open questions extracted from recent papers, rank them by how much follow-up work they actually generated.
+\textbf{Generate $\to$ Execute $\to$ Judge.} The full loop: (1) the model generates a concrete research idea with methodology and contribution statement; (2) a code agent implements it---runs experiments, generates figures, writes results; (3) we feed the output through a conference acceptance model trained on real venue decisions. This gives a scalar reward signal for RLHF-style fine-tuning: optimize taste by optimizing for directions that produce accepted papers.
 
-\subsection{LLM-as-Judge}
-
-We use a strong LLM (e.g., Claude, GPT-4) to evaluate generated research directions on: (a) \textit{novelty}---does this direction differ meaningfully from existing work? (b) \textit{specificity}---is this concrete enough to act on, or is it vague hand-waving? (c) \textit{grounding}---does the direction follow logically from the gaps identified in the literature? (d) \textit{feasibility}---could a competent researcher actually execute this? This gives us a scalable proxy for expert judgment that we can run on thousands of generated directions.
-
-\subsection{End-to-End: Generate $\to$ Execute $\to$ Judge}
-
-The strongest evaluation closes the loop entirely. Given a generated research direction:
-\begin{enumerate}
-    \item \textbf{Generate}: the model produces a concrete research idea with methodology, expected results, and contribution statement---essentially a mini-proposal.
-    \item \textbf{Execute}: a code agent (e.g., AI Scientist-style) attempts to implement the idea---runs experiments, generates figures, writes up results.
-    \item \textbf{Judge}: we feed the resulting paper through a \textit{conference acceptance model}---a classifier trained on accept/reject decisions from real venues. This gives us a scalar reward signal: did the generated direction lead to work that looks like it would be accepted?
-\end{enumerate}
-
-This creates a generator-verifier loop for research taste. The acceptance model serves as a learned verifier that captures the implicit standards of the research community. Crucially, this evaluates the \textit{full pipeline}---not just whether the model can identify interesting gaps, but whether those gaps lead to executable, publishable contributions. We can also use the acceptance model's score as a reward signal for RLHF-style fine-tuning, iteratively improving the model's taste by optimizing for directions that produce high-quality papers.
-
-\subsection{Human Expert Evaluation}
-
-As a final check, we run blind comparisons: present domain experts with research directions generated by T$^4$ alongside directions from actual papers (extracted from their introductions/abstracts), and measure (a) whether experts can distinguish generated from real, and (b) comparative ratings on novelty, feasibility, and importance. This is expensive but necessary to validate that automatic metrics correlate with genuine research quality.
+\textbf{Human expert evaluation.} Blind comparison: domain experts rate generated vs.\ real research directions on novelty, feasibility, and importance, and we measure discriminability.
 
 \printbibliography
 
